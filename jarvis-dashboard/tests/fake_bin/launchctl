@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test stand-in for macOS launchctl: logs calls, pretends to succeed.
+echo "$*" >> "${FAKE_LAUNCHCTL_LOG:-/dev/null}"
+if [[ "$1" == "print" ]]; then printf '\tstate = running\n\tpid = 4242\n\tlast exit code = 0\n'; fi
+exit 0

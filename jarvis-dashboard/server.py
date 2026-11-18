@@ -34,6 +34,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from assistant import briefing as briefing_mod  # noqa: E402
+from assistant.today import TodayService  # noqa: E402
+
+TODAY = TodayService()
 STATIC_DIR = HERE / "static"
 SETTINGS_PATH = Path(
     os.environ.get("JARVIS_DASHBOARD_SETTINGS", str(HERE / "settings.json"))
@@ -317,6 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(list_models(self.oj_url, self.ollama_url))
         if path == "/api/status":
             return self._status()
+        if path in ("/api/today", "/api/briefing", "/api/today/context"):
+            return self._today(path)
         return self._static(path)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -381,6 +388,22 @@ class Handler(BaseHTTPRequestHandler):
             "speaking": self.speaker.speaking,
         }
         self._send_json(status)
+
+    def _today(self, path: str) -> None:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        force = query.get("refresh", ["0"])[0] == "1"
+        try:
+            today = TODAY.build(force=force)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": "Today failed: %s" % exc}, 500)
+        now = TODAY._now()
+        if path == "/api/today":
+            return self._send_json(today)
+        if path == "/api/briefing":
+            return self._send_json({"text": briefing_mod.compose(today, now),
+                                    "generated_at": today["generated_at"]})
+        return self._send_json({"context": briefing_mod.chat_context(today, now),
+                                "generated_at": today["generated_at"]})
 
     def _static(self, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")

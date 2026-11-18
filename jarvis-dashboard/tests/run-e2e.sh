@@ -34,9 +34,30 @@ export JARVIS_DASHBOARD_SETTINGS="$WORK/settings.json"
 : > "$MOCK_OLLAMA_LOG"; : > "$MOCK_STT_LOG"; : > "$FAKE_SAY_LOG"; rm -f "$JARVIS_DASHBOARD_SETTINGS"
 
 python3 "$T/mock_ollama.py" "$OLLAMA_PORT" & MOCK_PID=$!
-cleanup() { kill "$MOCK_PID" ${LAUNCH_PID:+"$LAUNCH_PID"} 2>/dev/null || true; wait 2>/dev/null || true; }
+cleanup() { kill "$MOCK_PID" ${LAUNCH_PID:+"$LAUNCH_PID"} ${SAMPLE_PID:+"$SAMPLE_PID"} 2>/dev/null || true; wait 2>/dev/null || true; }
 trap cleanup EXIT
 for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$OLLAMA_PORT/api/tags" >/dev/null 2>&1 && break; sleep 0.2; done
+
+# Sample assistant data: iCal feeds + fake IMAP server + bills + Mac Calendar db,
+# and a fake Keychain (tests/fake_bin/security backed by a JSON file).
+export JARVIS_HOME="$WORK/jarvis-home" FAKE_KEYCHAIN="$WORK/jarvis-home/fake-keychain.json"
+FEED_PORT=18903 IMAP_PORT=18904
+rm -rf "$JARVIS_HOME"
+python3 "$T/sample_servers.py" "$JARVIS_HOME" "$FEED_PORT" "$IMAP_PORT" > "$WORK/sample-servers.log" 2>&1 & SAMPLE_PID=$!
+for _ in $(seq 1 50); do grep -q ready "$WORK/sample-servers.log" 2>/dev/null && break; sleep 0.2; done
+
+# Exercise the launcher's setup commands exactly as on the Mac.
+echo "launcher subcommands:"
+printf 'http://127.0.0.1:%s/personal.ics\n' "$FEED_PORT" | PATH="$T/fake_bin:$PATH" OPENJARVIS_PYTHON="${OPENJARVIS_PYTHON:-}" \
+  "$D/jarvis-dashboard" setup calendar --label "School events" | sed 's/^/  | /'
+PATH="$T/fake_bin:$PATH" "$D/jarvis-dashboard" sources | sed 's/^/  | /'
+PATH="$T/fake_bin:$PATH" "$D/jarvis-dashboard" remove "School events" | sed 's/^/  | /'
+mkdir -p "$WORK/fakehome"
+HOME="$WORK/fakehome" FAKE_LAUNCHCTL_LOG="$WORK/launchctl.log" PATH="$T/fake_bin:$PATH" \
+  OPENJARVIS_PYTHON="${OPENJARVIS_PYTHON:-}" "$D/jarvis-dashboard" launchagent install | sed 's/^/  | /'
+HOME="$WORK/fakehome" FAKE_LAUNCHCTL_LOG="$WORK/launchctl.log" PATH="$T/fake_bin:$PATH" \
+  OPENJARVIS_PYTHON="${OPENJARVIS_PYTHON:-}" "$D/jarvis-dashboard" launchagent uninstall | sed 's/^/  | /'
+sed 's/^/  | launchctl /' "$WORK/launchctl.log"
 
 # The one-command launcher, exactly as on the Mac, pointed at the mocks.
 PATH="$T/fake_bin:$PATH" OLLAMA_HOST_URL="http://127.0.0.1:$OLLAMA_PORT" \
@@ -51,5 +72,5 @@ for _ in $(seq 1 300); do
 done
 echo "launcher output:"; sed 's/^/  | /' "$WORK/launcher.log"
 
-DASH_URL="http://127.0.0.1:$DASH_PORT" WORK="$WORK" node "$T/e2e.mjs"
+DASH_URL="http://127.0.0.1:$DASH_PORT" WORK="$WORK" IMAP_LOG="$JARVIS_HOME/imap-commands.log" node "$T/e2e.mjs"
 echo "artifacts in $WORK"

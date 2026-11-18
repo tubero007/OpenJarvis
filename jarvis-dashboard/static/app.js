@@ -13,7 +13,8 @@ const PERSONA = [
   "Your replies are usually spoken aloud, so: answer in one to three short sentences unless the user asks for detail;",
   "write plain conversational prose with no markdown, bullet lists, code blocks, emoji or URLs unless explicitly asked;",
   "don't narrate your reasoning; if you don't know something, say so briefly.",
-  "In this chat you have no access to the user's email, calendar, files or the internet, so never claim to have checked them.",
+  "You may be given the user's read-only Today data (calendar, Canvas deadlines, bills, subscriptions, important email); use only that data and never claim to have checked anything else.",
+  "This version is read-only: you cannot pay, transfer money, cancel subscriptions, reply to or send email. If asked, say so plainly.",
 ].join(" ");
 
 const HISTORY_LIMIT = 24; // messages kept in the model's context
@@ -271,7 +272,8 @@ async function converse(userText, source) {
   let spokenPos = 0;
   const myEpoch = speech.epoch;
   try {
-    const messages = [{ role: "system", content: PERSONA }, ...app.history.slice(-HISTORY_LIMIT)];
+    const system = await systemPrompt();
+    const messages = [{ role: "system", content: system }, ...app.history.slice(-HISTORY_LIMIT)];
     const result = await streamChat(messages, app.settings.model, {
       signal: ctrl.signal,
       onText(visible) {
@@ -434,9 +436,9 @@ async function transcribeAndSend(blob) {
   await converse(text, "voice");
 }
 
-// ---------------------------------------------------------------- briefing
-async function briefing() {
-  const btn = $("briefing");
+// ---------------------------------------------------------------- OpenJarvis digest
+async function ojDigest() {
+  const btn = $("oj-digest");
   btn.disabled = true;
   await speech.stop();
   app.busy = true;
@@ -459,6 +461,200 @@ async function briefing() {
     btn.disabled = false;
     if (!speech.active && app.state !== "error") settle();
   }
+}
+
+// ---------------------------------------------------------------- Today
+const SECTIONS = [
+  ["schedule", "Schedule today", "Nothing on your calendar today."],
+  ["deadlines", "Canvas deadlines", "No Canvas deadlines in the next week."],
+  ["payments", "Payments due", "No payments due soon."],
+  ["renewals", "Subscription renewals", "No renewals coming up."],
+  ["email", "Important email", "Nothing that looks important."],
+];
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text; // always text, never HTML: sources are untrusted
+  return e;
+}
+
+function fmtMoney(a) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: a.currency || "USD" }).format(a.value);
+  } catch (_) { return (a.currency || "") + " " + a.value.toFixed(2); }
+}
+
+function fmtWhen(iso, allDay, overdueVerb) {
+  if (!iso) return "no date found";
+  const d = new Date(iso);
+  const now = new Date();
+  const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayN = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.round((dayN - day0) / 86400000);
+  let day = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff === -1 ? "Yesterday"
+    : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  if (allDay) return day;
+  return day + " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function fmtChecked(iso) {
+  if (!iso) return "never";
+  const d = new Date(iso);
+  const mins = Math.round((Date.now() - d) / 60000);
+  const clock = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return mins < 1 ? `just now (${clock})` : mins < 60 ? `${mins} min ago (${clock})` : clock;
+}
+
+function renderItem(key, it) {
+  const box = el("div", "item" + (it.overdue ? " overdue" : ""));
+  box.dataset.section = key;
+  const main = el("div", "item-main");
+  const title = el("span", "item-title", it.title);
+  if (it.overdue) title.appendChild(el("span", "badge overdue", key === "deadlines" ? "past due" : "overdue"));
+  if (it.unread) title.appendChild(el("span", "badge unread", "unread"));
+  main.appendChild(title);
+  if (it.amount) {
+    const est = it.amount.estimate;
+    const amt = el("span", "amount" + (est ? " est" : ""), (est ? "≈ " : "") + fmtMoney(it.amount));
+    if (est) amt.appendChild(el("span", "badge est", "estimate"));
+    main.appendChild(amt);
+  }
+  box.appendChild(main);
+
+  const subBits = [];
+  if (key === "email") {
+    subBits.push(it.subtitle, it.when ? fmtWhen(it.when, false) : "");
+    if (it.reasons && it.reasons.length) subBits.push(it.reasons.join(", "));
+  } else {
+    const verb = key === "deadlines" ? "Due " : key === "payments" ? "Due " : key === "renewals" ? "Renews " : "";
+    let when = it.when ? fmtWhen(it.when, it.all_day) : "No due date found";
+    if (key === "schedule" && it.all_day) when = "All day";
+    else if (key === "schedule" && it.end) when += "–" + new Date(it.end).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    subBits.push(verb + when + (it.date_estimate && !it.from_email ? " (projected)" : ""), it.subtitle);
+  }
+  box.appendChild(el("div", "item-sub", subBits.filter(Boolean).join(" · ")));
+  if (it.snippet) box.appendChild(el("div", "item-snippet", it.snippet));
+  if (it.estimate_note) box.appendChild(el("div", "item-est", "Estimate: " + it.estimate_note));
+
+  const src = el("div", "item-src");
+  src.appendChild(el("span", "src-label", it.source.label));
+  src.appendChild(document.createTextNode(" · checked " + fmtChecked(it.source.checked_at)));
+  src.title = it.source.detail || "";
+  if (it.link && /^https:\/\//.test(it.link)) {
+    src.appendChild(document.createTextNode(" · "));
+    const a = el("a", null, "view in Canvas ↗");
+    a.href = it.link;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    src.appendChild(a);
+  }
+  box.appendChild(src);
+  return box;
+}
+
+function renderToday(t) {
+  app.today = t;
+  const body = $("today-body");
+  body.innerHTML = "";
+  $("today-title").textContent = "Today · " + new Date(t.generated_at).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  for (const [key, label, empty] of SECTIONS) {
+    const items = t.sections[key] || [];
+    const sec = el("div", "today-section");
+    sec.dataset.section = key;
+    const h = el("h3", null, label);
+    h.appendChild(el("span", "count", String(items.length)));
+    sec.appendChild(h);
+    if (!items.length) sec.appendChild(el("p", "empty", empty));
+    for (const it of items) sec.appendChild(renderItem(key, it));
+    body.appendChild(sec);
+  }
+  const srcBox = $("today-sources");
+  srcBox.innerHTML = "";
+  for (const s of t.sources) {
+    let line;
+    if (!s.configured) {
+      line = el("div", "src-off", s.label + " — not set up");
+      if (s.setup_hint) { line.appendChild(document.createTextNode(": ")); line.appendChild(el("code", null, s.setup_hint)); }
+    } else if (s.ok) {
+      line = el("div", "src-ok", `${s.label} — checked ${fmtChecked(s.checked_at)}`);
+    } else {
+      line = el("div", "src-err", `${s.label} — couldn't check: ${s.error}`);
+    }
+    line.title = s.detail || "";
+    srcBox.appendChild(line);
+  }
+  const ok = t.sources.filter((s) => s.configured && s.ok).length;
+  const bad = t.sources.filter((s) => s.configured && !s.ok).length;
+  const off = t.sources.filter((s) => !s.configured).length;
+  const sum = $("sources-summary");
+  sum.textContent = `Sources · ${ok} ok` + (bad ? ` · ${bad} problem${bad > 1 ? "s" : ""}` : "") + (off ? ` · ${off} not set up` : "");
+  sum.classList.toggle("bad", bad > 0);
+  if (bad || !app.todayRendered) $("sources-box").open = bad > 0 || off === t.sources.length - 1;
+  app.todayRendered = true;
+  updateCheckedLabel();
+}
+
+function updateCheckedLabel() {
+  if (!app.today) return;
+  const d = new Date(app.today.generated_at);
+  const mins = Math.round((Date.now() - d) / 60000);
+  $("today-checked").textContent = mins < 1 ? "updated now" : mins < 60 ? `updated ${mins}m ago` : "updated " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  $("today-checked").title = "Last checked " + d.toLocaleString();
+}
+
+async function loadToday(force) {
+  const btn = $("today-refresh");
+  btn.disabled = true;
+  try {
+    renderToday(await api("/api/today" + (force ? "?refresh=1" : "")));
+  } catch (e) {
+    $("today-body").innerHTML = "";
+    $("today-body").appendChild(el("p", "hint pad", "Couldn't load Today: " + e.message));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function systemPrompt() {
+  if (!$("today-in-chat").checked) return PERSONA;
+  try {
+    const r = await api("/api/today/context");
+    return PERSONA + "\n\n" + r.context;
+  } catch (_) {
+    return PERSONA;
+  }
+}
+
+async function briefing() {
+  const btn = $("briefing");
+  btn.disabled = true;
+  await speech.stop();
+  if (app.chatAbort) app.chatAbort.abort();
+  app.busy = true;
+  setState("thinking", "Checking your sources");
+  try {
+    await loadToday(true);
+    const r = await api("/api/briefing");
+    addEntry("assistant", r.text, "☀ Today briefing");
+    app.history.push({ role: "assistant", content: r.text });
+    app.busy = false;
+    speech.enqueue(r.text);
+  } catch (e) {
+    app.busy = false;
+    note("Briefing failed: " + e.message);
+    setState("error");
+    setTimeout(settle, 2500);
+  } finally {
+    btn.disabled = false;
+    if (!speech.active && app.state !== "error") settle();
+  }
+}
+
+function showPanel(name) {
+  document.body.dataset.panel = name;
+  $("tab-today").setAttribute("aria-pressed", String(name === "today"));
+  $("tab-transcript").setAttribute("aria-pressed", String(name === "transcript"));
 }
 
 // ---------------------------------------------------------------- settings & status
@@ -869,6 +1065,10 @@ function wire() {
   });
   $("clear").addEventListener("click", () => { app.history = []; $("transcript").innerHTML = ""; });
   $("briefing").addEventListener("click", briefing);
+  $("oj-digest").addEventListener("click", ojDigest);
+  $("today-refresh").addEventListener("click", () => loadToday(true));
+  $("tab-today").addEventListener("click", () => showPanel("today"));
+  $("tab-transcript").addEventListener("click", () => showPanel("transcript"));
   $("fullscreen").addEventListener("click", toggleFullscreen);
   $("compare-open").addEventListener("click", openCompare);
   $("compare-close").addEventListener("click", () => ($("compare").hidden = true));
@@ -896,8 +1096,11 @@ async function init() {
   wire();
   try { app.settings = await api("/api/settings"); } catch (_) { /* defaults */ }
   renderMute();
-  await Promise.all([loadModels(), loadVoices(), refreshStatus()]);
+  showPanel("today");
+  await Promise.all([loadModels(), loadVoices(), refreshStatus(), loadToday(false)]);
   setInterval(refreshStatus, 10000);
+  setInterval(() => loadToday(false), 5 * 60 * 1000); // server re-checks sources every 15 min
+  setInterval(updateCheckedLabel, 30 * 1000);
   setState("idle");
   app.ready = true;
 }

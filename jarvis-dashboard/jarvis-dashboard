@@ -3,6 +3,11 @@
 #
 #   ./jarvis-dashboard           start everything and open the dashboard
 #   ./jarvis-dashboard doctor    inspect what's installed, start nothing
+#   ./jarvis-dashboard setup canvas|calendar|email|apple-calendar   connect a read-only source
+#   ./jarvis-dashboard bills     create/open your bills & subscriptions list
+#   ./jarvis-dashboard sources   check every source now
+#   ./jarvis-dashboard remove <source>
+#   ./jarvis-dashboard launchagent install|uninstall|restart|status|logs   (opt-in start at login)
 #
 # Everything binds to 127.0.0.1. Your OpenJarvis install is used read-only:
 # the API server's extra packages (fastapi, uvicorn, faster-whisper) are layered
@@ -104,7 +109,19 @@ for m in sorted(json.load(sys.stdin).get("models",[]), key=lambda m: m.get("size
   api_up && echo "OpenJarvis API   : already running on 127.0.0.1:$API_PORT" || echo "OpenJarvis API   : not running on 127.0.0.1:$API_PORT (the launcher starts it)"
 }
 
-if [[ "${1:-}" == "doctor" ]]; then doctor; exit 0; fi
+case "${1:-}" in
+  doctor) doctor; exit 0 ;;
+  setup|remove|bills|sources|launchagent)
+    cd "$DIR"
+    JARVIS_LAUNCHER="$DIR/jarvis-dashboard" exec "$OJ_PY" -m assistant.cli "$@" ;;
+  "") ;;
+  *) die "Unknown command '$1'. Try: doctor, setup, bills, sources, remove, launchagent." ;;
+esac
+
+if curl -fsS --max-time 2 "http://127.0.0.1:$DASH_PORT/api/settings" >/dev/null 2>&1; then
+  say_step "Jarvis is already running at http://127.0.0.1:$DASH_PORT"
+  exit 0
+fi
 
 # ---------------------------------------------------------------- launch
 PIDS=()
