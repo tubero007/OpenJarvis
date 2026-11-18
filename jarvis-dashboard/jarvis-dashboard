@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Jarvis Dashboard launcher (macOS).
+#
+#   ./jarvis-dashboard           start everything and open the dashboard
+#   ./jarvis-dashboard doctor    inspect what's installed, start nothing
+#
+# Everything binds to 127.0.0.1. Your OpenJarvis install is used read-only:
+# the API server's extra packages (fastapi, uvicorn, faster-whisper) are layered
+# on with `uv run --with`, in uv's cache, without touching ~/.openjarvis/.venv.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OJ_HOME="${OPENJARVIS_HOME:-$HOME/.openjarvis}"
+DASH_PORT="${JARVIS_DASHBOARD_PORT:-8770}"
+API_PORT="${JARVIS_API_PORT:-8765}"
+OLLAMA_URL="${OLLAMA_HOST_URL:-http://127.0.0.1:11434}"
+LOG_DIR="$DIR/logs"
+mkdir -p "$LOG_DIR"
+
+say_step() { printf '\033[36m▸\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- discovery
+find_oj_python() {
+  if [[ -n "${OPENJARVIS_PYTHON:-}" ]]; then echo "$OPENJARVIS_PYTHON"; return; fi
+  if [[ -x "$OJ_HOME/.venv/bin/python" ]]; then echo "$OJ_HOME/.venv/bin/python"; return; fi
+  local jarvis_bin
+  jarvis_bin="$(command -v jarvis || true)"
+  if [[ -n "$jarvis_bin" ]]; then
+    # Follow the wrapper/entry point to the interpreter in its shebang.
+    local real; real="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$jarvis_bin" 2>/dev/null || echo "$jarvis_bin")"
+    local shebang; shebang="$(head -1 "$real" | sed -n 's/^#!\(.*python[0-9.]*\).*$/\1/p')"
+    if [[ -n "$shebang" && -x "$shebang" ]]; then echo "$shebang"; return; fi
+    local sibling; sibling="$(dirname "$real")/python"
+    if [[ -x "$sibling" ]]; then echo "$sibling"; return; fi
+  fi
+  return 1
+}
+
+find_uv() {
+  command -v uv 2>/dev/null && return
+  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "$OJ_HOME/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+    [[ -x "$c" ]] && { echo "$c"; return; }
+  done
+  return 1
+}
+
+ollama_up() { curl -fsS --max-time 2 "$OLLAMA_URL/api/tags" >/dev/null 2>&1; }
+api_up() { curl -fsS --max-time 2 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; }
+
+default_model() {
+  if [[ -n "${JARVIS_MODEL:-}" ]]; then echo "$JARVIS_MODEL"; return; fi
+  "$OJ_PY" -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("model") or "qwen3.5:2b")
+except Exception: print("qwen3.5:2b")' "${JARVIS_DASHBOARD_SETTINGS:-$DIR/settings.json}"
+}
+
+# Server extras layered over the OpenJarvis environment (matches its
+# `server` + speech parts of the `desktop` extra in pyproject.toml).
+UV_WITH=(
+  --with "fastapi>=0.110" --with "uvicorn>=0.30" --with "pydantic>=2.0"
+  --with "python-multipart>=0.0.9"
+  --with "faster-whisper>=1.0" --with "av>=11,<19" --with "numpy>=1.24"
+  --with "onnxruntime<1.24; sys_platform == 'darwin' and platform_machine == 'x86_64'"
+)
+
+# JARVIS_SERVE_ENTRY is a test hook (tests/run-e2e.sh swaps in a mock speech backend).
+OJ_PY="$(find_oj_python)" || die "Couldn't find OpenJarvis' Python. Set OPENJARVIS_PYTHON=/path/to/venv/bin/python."
+UV="$(find_uv)" || die "Couldn't find uv (the OpenJarvis installer normally puts it in ~/.local/bin)."
+
+# ---------------------------------------------------------------- doctor
+doctor() {
+  echo "OpenJarvis python : $OJ_PY"
+  "$OJ_PY" -c 'import openjarvis,sys;print("OpenJarvis       :", openjarvis.__version__, "(python", sys.version.split()[0]+")")' \
+    || warn "openjarvis is not importable from that Python"
+  "$OJ_PY" -c 'import openjarvis_rust' 2>/dev/null && echo "Rust extension   : installed" || echo "Rust extension   : not installed (optional)"
+  for mod in fastapi uvicorn faster_whisper; do
+    "$OJ_PY" -c "import $mod" 2>/dev/null && echo "In OpenJarvis venv: $mod" || echo "Not in OpenJarvis venv: $mod (dashboard layers it on via uv --with)"
+  done
+  echo "uv               : $UV ($("$UV" --version 2>/dev/null))"
+  if command -v ollama >/dev/null; then echo "ollama CLI       : $(ollama --version 2>/dev/null | tail -1)"; else echo "ollama CLI       : not on PATH"; fi
+  if ollama_up; then
+    echo "Ollama server    : running at $OLLAMA_URL"
+    echo "Fully downloaded models (Ollama lists a model only once its pull completes):"
+    curl -fsS "$OLLAMA_URL/api/tags" | "$OJ_PY" -c 'import json,sys
+for m in sorted(json.load(sys.stdin).get("models",[]), key=lambda m: m.get("size",0)):
+    d=m.get("details") or {}
+    print("   %-34s %6.1f GB  %-8s %s" % (m["name"], m.get("size",0)/1e9, d.get("parameter_size",""), d.get("quantization_level","")))'
+    if command -v ollama >/dev/null; then
+      local partial
+      partial="$(find "${OLLAMA_MODELS:-$HOME/.ollama/models}/blobs" -name '*-partial*' 2>/dev/null | wc -l | tr -d ' ')"
+      [[ "$partial" != "0" ]] && warn "$partial partial download file(s) in ~/.ollama/models/blobs — some pull did not finish (re-run 'ollama pull <model>')."
+    fi
+  else
+    warn "Ollama server not reachable at $OLLAMA_URL"
+  fi
+  if command -v say >/dev/null; then
+    if say -v '?' | grep -q '^Daniel '; then echo "macOS voice      : Daniel available"; else warn "Daniel voice not installed (System Settings → Accessibility → Spoken Content → Manage Voices)"; fi
+    echo "English voices   : $(say -v '?' | awk '/ en_/ {print $1}' | sort -u | tr '\n' ' ')"
+  else
+    warn "macOS 'say' not found (not on macOS?) — the dashboard will fall back to browser voices"
+  fi
+  api_up && echo "OpenJarvis API   : already running on 127.0.0.1:$API_PORT" || echo "OpenJarvis API   : not running on 127.0.0.1:$API_PORT (the launcher starts it)"
+}
+
+if [[ "${1:-}" == "doctor" ]]; then doctor; exit 0; fi
+
+# ---------------------------------------------------------------- launch
+PIDS=()
+cleanup() {
+  trap - EXIT INT TERM
+  if [[ ${#PIDS[@]} -gt 0 ]]; then kill ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true; fi
+  wait 2>/dev/null || true
+  echo; say_step "Jarvis dashboard stopped."
+}
+trap cleanup EXIT INT TERM
+
+if ! ollama_up; then
+  if [[ -d /Applications/Ollama.app ]]; then
+    say_step "Starting Ollama app…"; open -ga Ollama
+  elif command -v ollama >/dev/null; then
+    say_step "Starting ollama serve…"
+    OLLAMA_HOST=127.0.0.1:11434 ollama serve >"$LOG_DIR/ollama.log" 2>&1 & PIDS+=($!)
+  else
+    die "Ollama isn't running and isn't installed."
+  fi
+  for _ in $(seq 1 30); do ollama_up && break; sleep 1; done
+  ollama_up || die "Ollama didn't come up (see $LOG_DIR/ollama.log)."
+fi
+
+MODEL="$(default_model)"
+if api_up; then
+  say_step "Reusing OpenJarvis API already on 127.0.0.1:$API_PORT"
+else
+  say_step "Starting OpenJarvis API on 127.0.0.1:$API_PORT (model $MODEL)…"
+  say_step "First run downloads the server packages into uv's cache; give it a minute."
+  # --agent simple: plain conversation (no tool-calling agent) so replies stream.
+  "$UV" run --no-project --python "$OJ_PY" "${UV_WITH[@]}" -- \
+    python ${JARVIS_SERVE_ENTRY:--m openjarvis.cli} serve --host 127.0.0.1 --port "$API_PORT" --agent simple --model "$MODEL" \
+    >"$LOG_DIR/openjarvis.log" 2>&1 &
+  API_PID=$!; PIDS+=("$API_PID")
+  for _ in $(seq 1 240); do
+    api_up && break
+    kill -0 "$API_PID" 2>/dev/null || { tail -30 "$LOG_DIR/openjarvis.log" >&2; die "OpenJarvis API exited (log: $LOG_DIR/openjarvis.log)."; }
+    sleep 1
+  done
+  api_up || die "OpenJarvis API didn't start in time (log: $LOG_DIR/openjarvis.log)."
+fi
+
+say_step "Starting dashboard on http://127.0.0.1:$DASH_PORT"
+"$OJ_PY" "$DIR/server.py" --port "$DASH_PORT" --openjarvis "http://127.0.0.1:$API_PORT" --ollama "$OLLAMA_URL" \
+  >"$LOG_DIR/dashboard.log" 2>&1 & PIDS+=($!)
+for _ in $(seq 1 20); do curl -fsS --max-time 1 "http://127.0.0.1:$DASH_PORT/api/settings" >/dev/null 2>&1 && break; sleep 0.5; done
+
+URL="http://127.0.0.1:$DASH_PORT"
+if [[ -z "${JARVIS_NO_BROWSER:-}" ]] && command -v open >/dev/null; then open "$URL"; fi
+say_step "Jarvis is up at $URL — press Ctrl-C here to stop it."
+wait

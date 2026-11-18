@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jarvis</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-state="idle">
+  <header class="topbar">
+    <div class="brand">J.A.R.V.I.S.</div>
+    <div class="status" id="status">
+      <span class="dot" id="dot-oj" title="OpenJarvis server"></span><span>OpenJarvis</span>
+      <span class="dot" id="dot-ollama" title="Ollama"></span><span>Ollama</span>
+      <span class="dot" id="dot-stt" title="Speech-to-text"></span><span>Mic STT</span>
+      <span class="dot" id="dot-tts" title="macOS voice"></span><span>Voice</span>
+    </div>
+    <div class="controls">
+      <label>Model <select id="model"></select></label>
+      <label>Voice <select id="voice"></select></label>
+      <button id="compare-open" class="ghost" title="Compare installed models">Compare</button>
+      <button id="fullscreen" class="ghost" title="Full screen (F)">⛶</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <canvas id="orb" aria-hidden="true"></canvas>
+      <div class="state-label" id="state-label" aria-live="polite">Standing by</div>
+    </section>
+
+    <aside class="transcript-panel">
+      <div class="panel-head">
+        <span>Transcript</span>
+        <button id="clear" class="ghost small">Clear</button>
+      </div>
+      <ol id="transcript" aria-live="polite"></ol>
+    </aside>
+  </main>
+
+  <footer class="dock">
+    <button id="ptt" class="ptt" title="Hold to talk (or hold Space)">
+      <span class="ptt-icon">🎙</span><span class="ptt-text">Hold to talk</span>
+    </button>
+    <form id="composer" autocomplete="off">
+      <input id="input" type="text" placeholder="Type to Jarvis…  (hold Space outside this box to talk)" aria-label="Message">
+      <button type="submit" id="send">Send</button>
+    </form>
+    <button id="mute" class="ghost" aria-pressed="false" title="Mute Jarvis's voice">🔊 Voice on</button>
+    <button id="stop" class="danger" title="Stop speaking (Esc)">■ Stop</button>
+    <button id="briefing" class="ghost" title="Spoken morning briefing (OpenJarvis morning digest)">☀ Briefing</button>
+  </footer>
+
+  <div class="modal" id="compare" hidden>
+    <div class="modal-card">
+      <div class="panel-head">
+        <span>Compare models on this Mac</span>
+        <button id="compare-close" class="ghost small">Close</button>
+      </div>
+      <p class="hint">Runs the same three prompts on each selected model. The first call warms the model up (load time is shown separately). Speed is streamed chunks per second, which is roughly tokens per second.</p>
+      <div id="compare-models" class="compare-models"></div>
+      <div class="compare-actions">
+        <button id="compare-run">Run comparison</button>
+        <span id="compare-progress" class="hint"></span>
+      </div>
+      <div id="compare-results"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
